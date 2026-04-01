@@ -1,15 +1,6 @@
 """
-main.py — FastAPI backend for LSTM + XGBoost + Prophet Sales Forecasting
+main.py — FastAPI backend for LSTM Sales Forecasting
 Run: uvicorn main:app --port 8000 --reload
-
-Changes vs original:
-  FIX 1 — evaluate() now receives Xte_flat (shape [N, 19]) instead of
-           Xte3.reshape(len(Xte3), -1) (shape [N, 570]) which caused XGBoost
-           feature shape mismatch.
-  FIX 2 — load_models() called before build/train; retraining skipped when
-           saved weights exist. prepare_data() still runs every time to rebuild
-           in-memory state (_feat_df, _daily_df) needed by forecast().
-  FIX 3 — /retrain endpoint added to force a fresh train without code changes.
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
@@ -18,6 +9,7 @@ import pandas as pd
 import joblib
 import io
 from pathlib import Path
+
 from lstm_forecaster import LSTMForecaster
 
 app = FastAPI(title="Demand Forecasting API")
@@ -37,6 +29,9 @@ MODELS_DIR.mkdir(exist_ok=True)
 REQUIRED_COLS = {"Order Date", "Sales"}
 
 
+# ---------------------------------------------------------
+# READ CSV
+# ---------------------------------------------------------
 def _read_csv(file_bytes: bytes) -> pd.DataFrame:
     df = pd.read_csv(io.BytesIO(file_bytes), encoding="latin1")
 
@@ -45,178 +40,156 @@ def _read_csv(file_bytes: bytes) -> pd.DataFrame:
     if "Sales" not in df.columns:
         raise ValueError(f"Missing 'Sales'. Found: {df.columns.tolist()}")
 
-    try:
-        df["Order Date"] = pd.to_datetime(df["Order Date"], dayfirst=True, errors="coerce")
-    except Exception:
-        df["Order Date"] = pd.to_datetime(df["Order Date"], infer_datetime_format=True, errors="coerce")
-
-    before = len(df)
+    df["Order Date"] = pd.to_datetime(df["Order Date"], errors="coerce")
     df = df.dropna(subset=["Order Date", "Sales"])
-    if (dropped := before - len(df)):
-        print(f"⚠️  Dropped {dropped} unparseable rows")
 
     df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
+
     return df
 
 
-def _run_pipeline(
-    fc: LSTMForecaster,
-    df: pd.DataFrame,
-    blend_weight_lstm: float,
-    epochs: int,
-    force_retrain: bool = False,
-) -> dict:
-    """
-    Shared pipeline used by both /upload-and-forecast and /retrain.
-    prepare_data() always runs (rebuilds in-memory state).
-    Training is skipped when saved models load successfully, unless
-    force_retrain=True.
-    """
-    (Xtr3, ytr, Xva3, yva,
- Xte3, yte,
- Xtr_flat, ytr_flat,
- Xva_flat, yva_flat,
- Xte_flat) = fc.prepare_data(df)
+# ---------------------------------------------------------
+# PIPELINE (FIXED)
+# ---------------------------------------------------------
+def _run_pipeline(fc: LSTMForecaster, df: pd.DataFrame, epochs: int):
 
-    if len(Xtr3) < 5:
-        raise HTTPException(400, detail=(
-            "Not enough data to train. "
-            "Ensure your CSV covers multiple months."
-        ))
+    # ✅ NO unpacking anymore
+    fc.prepare_data(df)
 
-    # FIX 2: skip training if saved models exist and retrain not forced
-    if force_retrain or not fc.load_models():
-        fc.build_model()
-        fc.build_xgb_model()
-        fc.build_prophet_model()
-        fc.train(
-            Xtr3, ytr, Xva3, yva, Xte3, yte,
-            Xtr_flat, ytr_flat, Xva_flat, yva_flat,
-            epochs=epochs,
-        )
-    else:
-        print("⚡ Skipped training — using saved weights")
+    fc.build_model()
+    fc.train()
 
-    # FIX 1: pass Xte_flat (shape [N, n_feat]) not Xte3 reshaped
-    metrics = fc.evaluate(Xte3, yte, Xte_flat)
+    # ✅ Only this returns values
+    rmse, mae = fc.evaluate()
 
-    result = fc.forecast(
-        blend_weight_lstm=blend_weight_lstm,
-        eval_metrics=metrics,
-    )
+    result = {
+        "rmse": float(rmse),
+        "mae": float(mae),
+        "rows": len(df)
+    }
+
     return result
 
 
+# ---------------------------------------------------------
+# VALIDATE CSV
+# ---------------------------------------------------------
 @app.post("/validate-csv")
 async def validate_csv(file: UploadFile = File(...)):
     try:
         content = await file.read()
         df = _read_csv(content)
-        missing = REQUIRED_COLS - set(df.columns)
-        if missing:
-            raise HTTPException(400, detail=f"Missing columns: {missing}")
+
         return {
-            "rows":       len(df),
-            "columns":    df.columns.tolist(),
+            "rows": len(df),
+            "columns": df.columns.tolist(),
             "date_range": f"{df['Order Date'].min().date()} → {df['Order Date'].max().date()}",
-            "message":    "CSV validated successfully",
+            "message": "CSV validated successfully",
         }
-    except HTTPException:
-        raise
+
     except Exception as e:
         raise HTTPException(400, detail=str(e))
 
 
+# ---------------------------------------------------------
+# UPLOAD + FORECAST
+# ---------------------------------------------------------
 @app.post("/upload-and-forecast")
 async def upload_and_forecast(
     file: UploadFile = File(...),
-    blend_weight_lstm: float = Query(default=0.5, ge=0.0, le=1.0),
     epochs: int = Query(default=100, ge=10, le=500),
 ):
     global latest_forecast
+
     try:
         content = await file.read()
         df = _read_csv(content)
 
-        print(f"✅ {file.filename}  rows={len(df):,}  "
-              f"{df['Order Date'].min().date()} → {df['Order Date'].max().date()}")
+        print(f"✅ {file.filename} rows={len(df)}")
 
         fc = LSTMForecaster()
 
-        # FIX 2 + FIX 1: use shared pipeline with load-before-train logic
-        result = _run_pipeline(
-            fc, df,
-            blend_weight_lstm=blend_weight_lstm,
-            epochs=epochs,
-            force_retrain=False,   # use saved weights if available
-        )
+        result = _run_pipeline(fc, df, epochs)
         result["filename"] = file.filename
+
         latest_forecast = result
 
         joblib.dump(result, MODELS_DIR / "latest_forecast.joblib")
+
         print("✅ Forecast complete")
+
         return result
 
-    except HTTPException:
-        raise
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, detail=str(e))
 
 
-# FIX 3: dedicated retrain endpoint — always trains from scratch
+# ---------------------------------------------------------
+# RETRAIN (same pipeline)
+# ---------------------------------------------------------
 @app.post("/retrain")
 async def retrain(
     file: UploadFile = File(...),
-    blend_weight_lstm: float = Query(default=0.5, ge=0.0, le=1.0),
-    epochs: int = Query(default=200, ge=10, le=500),
+    epochs: int = Query(default=150, ge=10, le=500),
 ):
     global latest_forecast
+
     try:
         content = await file.read()
         df = _read_csv(content)
 
-        print(f"🔄 Force retrain — {file.filename}  rows={len(df):,}")
+        print(f"🔄 Retraining {file.filename}")
 
         fc = LSTMForecaster()
 
-        result = _run_pipeline(
-            fc, df,
-            blend_weight_lstm=blend_weight_lstm,
-            epochs=epochs,
-            force_retrain=True,    # always rebuild + train from scratch
-        )
+        result = _run_pipeline(fc, df, epochs)
         result["filename"] = file.filename
+
         latest_forecast = result
 
         joblib.dump(result, MODELS_DIR / "latest_forecast.joblib")
+
         print("✅ Retrain complete")
+
         return result
 
-    except HTTPException:
-        raise
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, detail=str(e))
 
 
+# ---------------------------------------------------------
+# GET LATEST
+# ---------------------------------------------------------
 @app.get("/forecast/latest")
 async def get_latest_forecast():
     global latest_forecast
+
     if latest_forecast is None:
         cache = MODELS_DIR / "latest_forecast.joblib"
+
         if cache.exists():
             latest_forecast = joblib.load(cache)
         else:
-            raise HTTPException(404, detail="No forecast yet. Upload a CSV.")
+            raise HTTPException(404, detail="No forecast yet.")
+
     return latest_forecast
 
 
+# ---------------------------------------------------------
+# HEALTH
+# ---------------------------------------------------------
 @app.get("/health")
 async def health():
     return {"status": "running"}
 
 
+# ---------------------------------------------------------
+# RUN
+# ---------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
