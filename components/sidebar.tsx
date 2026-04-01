@@ -13,9 +13,9 @@ interface SidebarProps {
 
 const navItems = [
   { label: 'Dashboard', href: '/dashboard', icon: BarChart3 },
-  { label: 'Upload Data', href: '/dashboard/upload', icon: Upload },
+  // { label: 'Upload Data', href: '/dashboard/upload', icon: Upload },
   { label: 'Forecast', href: '/dashboard/forecast', icon: TrendingUp },
-  { label: 'Inventory', href: '/dashboard/inventory', icon: Package },
+  // { label: 'Inventory', href: '/dashboard/inventory', icon: Package },
   { label: 'Settings', href: '/dashboard/settings', icon: Settings },
 ]
 
