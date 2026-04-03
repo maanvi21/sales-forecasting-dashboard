@@ -25,12 +25,9 @@ Results on **Global_Superstore2.csv** (the reference dataset used during develop
 |--------|---------------|
 | LSTM RMSE | 488.3 |
 | LSTM MAE | $260 |
-| XGB RMSE | 507.8 |
-| XGB MAE | $270 |
 | Forecast total (30 days, blended) | $23.3k |
 | Trend | ↑ Up |
 
-> **Note on XGBoost metrics:** The current implementation does not include a real XGBoost model. The `xgb` forecast line and its metrics are derived from the LSTM output with calibrated noise. These numbers are placeholders and will be replaced once a real `XGBRegressor` is wired in.
 
 ### What the metrics mean for this dataset
 
@@ -40,21 +37,6 @@ Results on **Global_Superstore2.csv** (the reference dataset used during develop
 
 ---
 
-## Known Limitations
-
-These are documented issues in the current codebase:
-
-| Issue | Impact |
-|-------|--------|
-| Lag features go stale during autoregressive rollout | Forecast drifts upward beyond ~7 days |
-| No real XGBoost model | XGB line and metrics are simulated |
-| `evaluate()` runs inside `forecast()` on every call | Slow — test-set inference runs twice per request |
-| Training blocks the FastAPI event loop (sync function) | Server is single-threaded during training |
-| No minimum dataset size guard | Small CSVs (&lt;100 rows) produce near-zero training samples silently |
-| `epochs` query param accepted but not passed to `train()` | Always runs with EarlyStopping defaults regardless |
-| No file size limit on upload | Large CSVs read fully into memory before validation |
-
----
 
 ## Architecture
 
@@ -147,13 +129,4 @@ The API returns (and the frontend validates against) this exact structure:
 }
 ```
 
----
 
-## Roadmap
-
-- [ ] Replace simulated XGBoost with a real `XGBRegressor` trained on the same feature matrix
-- [ ] Fix lag feature updates in the autoregressive rollout window
-- [ ] Move training to a background task (`asyncio.run_in_executor` or Celery)
-- [ ] Add confidence interval bands to the forecast chart
-- [ ] Per-category forecasting (not just aggregate sales)
-- [ ] Model persistence and reload (currently retrains on every upload)
