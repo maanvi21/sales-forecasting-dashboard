@@ -1,7 +1,3 @@
-"""
-main.py — FastAPI backend for LSTM Sales Forecasting
-Run: uvicorn main:app --port 8000 --reload
-"""
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,31 +38,33 @@ def _read_csv(file_bytes: bytes) -> pd.DataFrame:
 
     df["Order Date"] = pd.to_datetime(df["Order Date"], errors="coerce")
     df = df.dropna(subset=["Order Date", "Sales"])
-
     df["Sales"] = pd.to_numeric(df["Sales"], errors="coerce").fillna(0)
 
     return df
 
 
 # ---------------------------------------------------------
-# PIPELINE (FIXED)
+# PIPELINE — trains the model then calls fc.forecast()
+# Returns the full shape the frontend's isValidForecast() expects:
+# { historical, forecast, metrics, message, filename, rows_processed }
 # ---------------------------------------------------------
-def _run_pipeline(fc: LSTMForecaster, df: pd.DataFrame, epochs: int):
+def _run_pipeline(
+    fc: LSTMForecaster,
+    df: pd.DataFrame,
+    filename: str,
+    horizon_days: int = 30,
+) -> dict:
 
-    # ✅ NO unpacking anymore
     fc.prepare_data(df)
-
     fc.build_model()
     fc.train()
 
-    # ✅ Only this returns values
-    rmse, mae = fc.evaluate()
+    # forecast() internally calls evaluate() and returns the full payload
+    result = fc.forecast(df, horizon_days=horizon_days)
 
-    result = {
-        "rmse": float(rmse),
-        "mae": float(mae),
-        "rows": len(df)
-    }
+    result["message"]        = "Forecast generated successfully"
+    result["filename"]       = filename
+    result["rows_processed"] = len(df)
 
     return result
 
@@ -98,6 +96,7 @@ async def validate_csv(file: UploadFile = File(...)):
 async def upload_and_forecast(
     file: UploadFile = File(...),
     epochs: int = Query(default=100, ge=10, le=500),
+    horizon_days: int = Query(default=30, ge=7, le=90),
 ):
     global latest_forecast
 
@@ -108,16 +107,12 @@ async def upload_and_forecast(
         print(f"✅ {file.filename} rows={len(df)}")
 
         fc = LSTMForecaster()
-
-        result = _run_pipeline(fc, df, epochs)
-        result["filename"] = file.filename
+        result = _run_pipeline(fc, df, filename=file.filename, horizon_days=horizon_days)
 
         latest_forecast = result
-
         joblib.dump(result, MODELS_DIR / "latest_forecast.joblib")
 
         print("✅ Forecast complete")
-
         return result
 
     except Exception as e:
@@ -127,12 +122,13 @@ async def upload_and_forecast(
 
 
 # ---------------------------------------------------------
-# RETRAIN (same pipeline)
+# RETRAIN
 # ---------------------------------------------------------
 @app.post("/retrain")
 async def retrain(
     file: UploadFile = File(...),
     epochs: int = Query(default=150, ge=10, le=500),
+    horizon_days: int = Query(default=30, ge=7, le=90),
 ):
     global latest_forecast
 
@@ -143,16 +139,12 @@ async def retrain(
         print(f"🔄 Retraining {file.filename}")
 
         fc = LSTMForecaster()
-
-        result = _run_pipeline(fc, df, epochs)
-        result["filename"] = file.filename
+        result = _run_pipeline(fc, df, filename=file.filename, horizon_days=horizon_days)
 
         latest_forecast = result
-
         joblib.dump(result, MODELS_DIR / "latest_forecast.joblib")
 
         print("✅ Retrain complete")
-
         return result
 
     except Exception as e:
@@ -170,7 +162,6 @@ async def get_latest_forecast():
 
     if latest_forecast is None:
         cache = MODELS_DIR / "latest_forecast.joblib"
-
         if cache.exists():
             latest_forecast = joblib.load(cache)
         else:
@@ -191,5 +182,5 @@ async def health():
 # RUN
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)

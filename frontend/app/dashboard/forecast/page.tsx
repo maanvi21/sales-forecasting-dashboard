@@ -13,10 +13,10 @@ import {
 
 const API = 'http://localhost:8000'
 
-// ── Updated type to match backend shape (FIX 7 — nested lstm/xgb metrics) ──
+// ── Types ───────────────────────────────────────────────────────────────────
 type ForecastData = {
-  historical: { dates: string[]; sales: number[] }
-  forecast:   { dates: string[]; lstm: number[]; xgb: number[]; blend: number[] }
+  historical:     { dates: string[]; sales: number[] }
+  forecast:       { dates: string[]; lstm: number[]; xgb: number[]; blend: number[] }
   metrics: {
     lstm_rmse:    number
     lstm_mae:     number
@@ -27,6 +27,25 @@ type ForecastData = {
   message:        string
   filename:       string
   rows_processed: number
+}
+
+// ── Shape validator — discards malformed / cached responses ─────────────────
+function isValidForecast(data: unknown): data is ForecastData {
+  if (!data || typeof data !== 'object') return false
+  const d = data as Record<string, any>
+  return (
+    Array.isArray(d?.historical?.dates)  &&
+    Array.isArray(d?.historical?.sales)  &&
+    Array.isArray(d?.forecast?.dates)    &&
+    Array.isArray(d?.forecast?.lstm)     &&
+    Array.isArray(d?.forecast?.xgb)      &&
+    Array.isArray(d?.forecast?.blend)    &&
+    typeof d?.metrics?.lstm_rmse === 'number' &&
+    typeof d?.metrics?.lstm_mae  === 'number' &&
+    typeof d?.metrics?.xgb_rmse  === 'number' &&
+    typeof d?.metrics?.xgb_mae   === 'number' &&
+    typeof d?.metrics?.horizon_days === 'number'
+  )
 }
 
 // ── Custom Tooltip ──────────────────────────────────────────────────────────
@@ -125,10 +144,14 @@ export default function ForecastPage() {
   const [activeTab, setActiveTab]         = useState<'combined' | 'forecast-only' | 'bar'>('combined')
   const [showModels, setShowModels]       = useState<'blend' | 'all'>('blend')
 
+  // ── Load cached forecast on mount — validate shape before storing ─────────
   useEffect(() => {
     fetch(`${API}/forecast/latest`)
       .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) setForecastData(data) })
+      .then(data => {
+        if (isValidForecast(data)) setForecastData(data)
+        // silently discard malformed cached responses
+      })
       .catch(() => {})
   }, [])
 
@@ -141,14 +164,21 @@ export default function ForecastPage() {
     try {
       const res  = await fetch(`${API}/validate-csv`, { method: 'POST', body: fd })
       const data = await res.json()
-      if (!res.ok) { setValidationOk(false); setValidationMsg(data.detail ?? 'Validation failed'); return }
+      if (!res.ok) {
+        setValidationOk(false)
+        setValidationMsg(data.detail ?? 'Validation failed')
+        return
+      }
       setValidationOk(true)
       setValidationMsg(`✓ ${data.rows.toLocaleString()} rows · ${data.columns?.length} columns`)
       await runForecast(file)
     } catch {
       setValidationOk(false)
       setValidationMsg('Server unreachable — is the backend running on port 8000?')
-    } finally { setIsValidating(false); e.target.value = '' }
+    } finally {
+      setIsValidating(false)
+      e.target.value = ''
+    }
   }
 
   const runForecast = async (file: File) => {
@@ -158,48 +188,62 @@ export default function ForecastPage() {
       const res  = await fetch(`${API}/upload-and-forecast`, { method: 'POST', body: fd })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail ?? 'Forecast failed')
+      if (!isValidForecast(data)) throw new Error('Backend returned an unexpected response shape.')
       setForecastData(data)
     } catch (err: any) {
       setError(err.message ?? 'Forecast generation failed')
-    } finally { setIsUploading(false) }
+    } finally {
+      setIsUploading(false)
+    }
   }
 
-  // ── Build chart data ──────────────────────────────────────────────────────
-  const combinedData = forecastData ? [
-    ...forecastData.historical.dates.map((date, i) => ({
+  // ── Safely destructure — never access .dates directly on forecastData ─────
+  const hist    = forecastData?.historical
+  const fcast   = forecastData?.forecast
+  const metrics = forecastData?.metrics
+
+  // ── Build chart data (fully guarded) ──────────────────────────────────────
+  const combinedData = (hist?.dates && fcast?.dates) ? [
+    ...hist.dates.map((date, i) => ({
       date:   date.slice(5),
-      actual: forecastData.historical.sales[i],
+      actual: hist.sales[i] ?? null,
       blend:  null as number | null,
       lstm:   null as number | null,
       xgb:    null as number | null,
     })),
-    ...forecastData.forecast.dates.map((date, i) => ({
+    ...fcast.dates.map((date, i) => ({
       date:   date.slice(5),
       actual: null as number | null,
-      blend:  forecastData.forecast.blend[i],
-      lstm:   forecastData.forecast.lstm[i],
-      xgb:    forecastData.forecast.xgb[i],
+      blend:  fcast.blend[i] ?? null,
+      lstm:   fcast.lstm[i]  ?? null,
+      xgb:    fcast.xgb[i]   ?? null,
     })),
   ] : []
 
-  const forecastBarData = forecastData?.forecast.dates.map((date, i) => ({
+  const forecastBarData = fcast?.dates?.map((date, i) => ({
     date:  date.slice(5),
-    sales: forecastData.forecast.blend[i],
+    sales: fcast.blend[i] ?? 0,
   })) ?? []
 
-  // Insights
-  const totalForecast = forecastData?.forecast.blend.reduce((a, b) => a + b, 0) ?? 0
-  const avgForecast   = forecastData ? totalForecast / forecastData.forecast.blend.length : 0
-  const lastActual    = forecastData?.historical.sales.at(-1) ?? 0
-  const trend         = avgForecast > lastActual * 1.1 ? 'up' : avgForecast < lastActual * 0.9 ? 'down' : 'stable'
+  // ── Derived insights (all guarded) ────────────────────────────────────────
+  const totalForecast = fcast?.blend?.reduce((a, b) => a + b, 0) ?? 0
+  const avgForecast   = (fcast?.blend?.length ?? 0) > 0
+    ? totalForecast / fcast!.blend.length
+    : 0
+  const lastActual = hist?.sales?.at(-1) ?? 0
+  const trend      = avgForecast > lastActual * 1.1
+    ? 'up'
+    : avgForecast < lastActual * 0.9
+    ? 'down'
+    : 'stable'
 
   const isWorking = isValidating || isUploading
 
-  // Safe metric accessors (guard against undefined on stale cached responses)
-  const lstmRmse = forecastData?.metrics?.lstm_rmse ?? 0
-  const lstmMae  = forecastData?.metrics?.lstm_mae  ?? 0
-  const xgbRmse  = forecastData?.metrics?.xgb_rmse  ?? 0
-  const xgbMae   = forecastData?.metrics?.xgb_mae   ?? 0
+  // Safe metric accessors
+  const lstmRmse = metrics?.lstm_rmse ?? 0
+  const lstmMae  = metrics?.lstm_mae  ?? 0
+  const xgbRmse  = metrics?.xgb_rmse  ?? 0
+  const xgbMae   = metrics?.xgb_mae   ?? 0
 
   return (
     <div style={{
@@ -265,7 +309,9 @@ export default function ForecastPage() {
           <label htmlFor="csv-upload" style={{ cursor: isWorking ? 'not-allowed' : 'pointer' }}>
             <div style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
-              background: isWorking ? 'rgba(99,102,241,0.3)' : 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+              background: isWorking
+                ? 'rgba(99,102,241,0.3)'
+                : 'linear-gradient(135deg, #6366f1, #8b5cf6)',
               color: 'white', padding: '12px 28px', borderRadius: 10,
               fontWeight: 600, fontSize: 15, cursor: isWorking ? 'not-allowed' : 'pointer',
               boxShadow: isWorking ? 'none' : '0 4px 20px rgba(99,102,241,0.4)',
@@ -277,7 +323,9 @@ export default function ForecastPage() {
               {isValidating ? 'Validating…' : isUploading ? 'Training Models…' : 'Choose CSV File'}
             </div>
             <input
-              id="csv-upload" type="file" accept=".csv"
+              id="csv-upload"
+              type="file"
+              accept=".csv"
               onChange={handleFileChange}
               style={{ display: 'none' }}
               disabled={isWorking}
@@ -311,7 +359,7 @@ export default function ForecastPage() {
         {/* ── Results ──────────────────────────────────────────────────────── */}
         {forecastData && (
           <>
-            {/* Stat Cards — 6 cards: LSTM RMSE/MAE, XGB RMSE/MAE, Total, Trend */}
+            {/* Stat Cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 14, marginBottom: 32 }}>
               <StatCard
                 label="LSTM RMSE"
@@ -340,14 +388,20 @@ export default function ForecastPage() {
               <StatCard
                 label="Forecast Total"
                 value={`$${(totalForecast / 1000).toFixed(1)}k`}
-                sub={`Next ${forecastData.metrics.horizon_days} days (blended)`}
+                sub={`Next ${metrics?.horizon_days ?? '—'} days (blended)`}
                 accent="rgba(249,115,22,0.5)"
               />
               <StatCard
                 label="Trend"
                 value={trend === 'up' ? '↑ Up' : trend === 'down' ? '↓ Down' : '→ Stable'}
                 sub="vs recent actuals"
-                accent={trend === 'up' ? 'rgba(74,222,128,0.5)' : trend === 'down' ? 'rgba(248,113,113,0.5)' : 'rgba(148,163,184,0.5)'}
+                accent={
+                  trend === 'up'
+                    ? 'rgba(74,222,128,0.5)'
+                    : trend === 'down'
+                    ? 'rgba(248,113,113,0.5)'
+                    : 'rgba(148,163,184,0.5)'
+                }
               />
             </div>
 
@@ -365,7 +419,7 @@ export default function ForecastPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <TrendingUp size={18} color="#6366f1" />
                   <span style={{ fontWeight: 700, fontSize: 16 }}>
-                    Sales Forecast — Historical + Next {forecastData.metrics.horizon_days} Days
+                    Sales Forecast — Historical + Next {metrics?.horizon_days ?? '—'} Days
                   </span>
                   {forecastData.filename && (
                     <span style={{
@@ -412,32 +466,48 @@ export default function ForecastPage() {
                     <ResponsiveContainer width="100%" height={400}>
                       <LineChart data={combinedData} margin={{ top: 10, right: 30, bottom: 60, left: 10 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.07)" />
-                        <XAxis dataKey="date" angle={-40} textAnchor="end" height={70}
+                        <XAxis
+                          dataKey="date" angle={-40} textAnchor="end" height={70}
                           tick={{ fill: '#64748b', fontSize: 11 }}
-                          axisLine={{ stroke: 'rgba(99,102,241,0.2)' }} />
-                        <YAxis tick={{ fill: '#64748b', fontSize: 11 }}
-                          axisLine={{ stroke: 'rgba(99,102,241,0.2)' }} />
+                          axisLine={{ stroke: 'rgba(99,102,241,0.2)' }}
+                        />
+                        <YAxis
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={{ stroke: 'rgba(99,102,241,0.2)' }}
+                        />
                         <Tooltip content={<CustomTooltip />} />
-                        <Legend verticalAlign="top" height={36}
-                          formatter={(v) => <span style={{ color: '#94a3b8', fontSize: 13 }}>{v}</span>} />
+                        <Legend
+                          verticalAlign="top" height={36}
+                          formatter={(v) => <span style={{ color: '#94a3b8', fontSize: 13 }}>{v}</span>}
+                        />
                         <ReferenceLine
-                          x={forecastData.historical.dates.at(-1)?.slice(5)}
+                          x={hist?.dates?.at(-1)?.slice(5)}
                           stroke="rgba(248,113,113,0.5)" strokeDasharray="6 3"
                           label={{ value: 'Forecast Start', fill: '#f87171', fontSize: 11 }}
                         />
-                        <Line type="monotone" dataKey="actual" stroke="#6366f1" strokeWidth={2.5}
+                        <Line
+                          type="monotone" dataKey="actual" stroke="#6366f1" strokeWidth={2.5}
                           dot={false} name="Historical Sales" connectNulls={false}
-                          activeDot={{ r: 5, fill: '#6366f1', stroke: '#1e1b4b', strokeWidth: 2 }} />
-                        <Line type="monotone" dataKey="blend" stroke="#f97316" strokeWidth={2.5}
+                          activeDot={{ r: 5, fill: '#6366f1', stroke: '#1e1b4b', strokeWidth: 2 }}
+                        />
+                        <Line
+                          type="monotone" dataKey="blend" stroke="#f97316" strokeWidth={2.5}
                           strokeDasharray="8 4" dot={{ r: 3, fill: '#f97316' }}
                           name="Blended Forecast" connectNulls={false}
-                          activeDot={{ r: 5, fill: '#f97316', stroke: '#431407', strokeWidth: 2 }} />
-                        {showModels === 'all' && <>
-                          <Line type="monotone" dataKey="lstm" stroke="#a78bfa" strokeWidth={1.5}
-                            strokeDasharray="4 4" dot={false} name="LSTM" connectNulls={false} />
-                          <Line type="monotone" dataKey="xgb" stroke="#34d399" strokeWidth={1.5}
-                            strokeDasharray="4 4" dot={false} name="XGBoost" connectNulls={false} />
-                        </>}
+                          activeDot={{ r: 5, fill: '#f97316', stroke: '#431407', strokeWidth: 2 }}
+                        />
+                        {showModels === 'all' && (
+                          <>
+                            <Line
+                              type="monotone" dataKey="lstm" stroke="#a78bfa" strokeWidth={1.5}
+                              strokeDasharray="4 4" dot={false} name="LSTM" connectNulls={false}
+                            />
+                            <Line
+                              type="monotone" dataKey="xgb" stroke="#34d399" strokeWidth={1.5}
+                              strokeDasharray="4 4" dot={false} name="XGBoost" connectNulls={false}
+                            />
+                          </>
+                        )}
                       </LineChart>
                     </ResponsiveContainer>
                   </>
@@ -449,21 +519,27 @@ export default function ForecastPage() {
                     <AreaChart data={forecastBarData} margin={{ top: 10, right: 30, bottom: 60, left: 10 }}>
                       <defs>
                         <linearGradient id="forecastFill" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="#f97316" stopOpacity={0.35} />
+                          <stop offset="0%"   stopColor="#f97316" stopOpacity={0.35} />
                           <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.07)" />
-                      <XAxis dataKey="date" angle={-40} textAnchor="end" height={70}
+                      <XAxis
+                        dataKey="date" angle={-40} textAnchor="end" height={70}
                         tick={{ fill: '#64748b', fontSize: 11 }}
-                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }} />
-                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }}
-                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }} />
+                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }}
+                      />
+                      <YAxis
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }}
+                      />
                       <Tooltip content={<BarTooltip />} />
-                      <Area type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={2.5}
+                      <Area
+                        type="monotone" dataKey="sales" stroke="#f97316" strokeWidth={2.5}
                         fill="url(#forecastFill)" name="Blended Forecast"
                         dot={{ r: 4, fill: '#f97316', stroke: '#431407', strokeWidth: 2 }}
-                        activeDot={{ r: 6 }} />
+                        activeDot={{ r: 6 }}
+                      />
                     </AreaChart>
                   </ResponsiveContainer>
                 )}
@@ -473,15 +549,22 @@ export default function ForecastPage() {
                   <ResponsiveContainer width="100%" height={400}>
                     <BarChart data={forecastBarData} margin={{ top: 10, right: 30, bottom: 60, left: 10 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.07)" vertical={false} />
-                      <XAxis dataKey="date" angle={-40} textAnchor="end" height={70}
+                      <XAxis
+                        dataKey="date" angle={-40} textAnchor="end" height={70}
                         tick={{ fill: '#64748b', fontSize: 11 }}
-                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }} />
-                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }}
-                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }} />
+                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }}
+                      />
+                      <YAxis
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={{ stroke: 'rgba(249,115,22,0.2)' }}
+                      />
                       <Tooltip content={<BarTooltip />} />
                       <Bar dataKey="sales" name="Blended Forecast" radius={[5, 5, 0, 0]}>
                         {forecastBarData.map((_, i) => (
-                          <Cell key={i} fill={`rgba(249,115,22,${0.4 + (i / forecastBarData.length) * 0.6})`} />
+                          <Cell
+                            key={i}
+                            fill={`rgba(249,115,22,${0.4 + (i / forecastBarData.length) * 0.6})`}
+                          />
                         ))}
                       </Bar>
                     </BarChart>
@@ -492,6 +575,8 @@ export default function ForecastPage() {
 
             {/* Insights Row */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+
+              {/* Key Insights */}
               <div style={{
                 background: 'linear-gradient(135deg, rgba(20,20,40,0.9), rgba(15,15,30,0.8))',
                 border: '1px solid rgba(99,102,241,0.2)', borderRadius: 16, padding: 24
@@ -504,7 +589,7 @@ export default function ForecastPage() {
                   {[
                     {
                       icon: <Target size={14} />,
-                      text: `Total forecast: $${totalForecast.toLocaleString(undefined, { maximumFractionDigits: 0 })} over ${forecastData.metrics.horizon_days} days`,
+                      text: `Total forecast: $${totalForecast.toLocaleString(undefined, { maximumFractionDigits: 0 })} over ${metrics?.horizon_days ?? '—'} days`,
                       color: '#a5b4fc'
                     },
                     {
@@ -523,7 +608,7 @@ export default function ForecastPage() {
                     },
                     {
                       icon: <Activity size={14} />,
-                      text: `Processed ${forecastData.rows_processed?.toLocaleString() ?? '—'} rows · 30-day look-back · LSTM + XGBoost ensemble`,
+                      text: `Processed ${forecastData.rows_processed?.toLocaleString() ?? '—'} rows · ${WINDOW}-day look-back · LSTM + XGBoost ensemble`,
                       color: '#a5b4fc'
                     },
                   ].map((item, i) => (
@@ -539,6 +624,7 @@ export default function ForecastPage() {
                 </div>
               </div>
 
+              {/* Model Summary */}
               <div style={{
                 background: 'linear-gradient(135deg, rgba(20,20,40,0.9), rgba(15,15,30,0.8))',
                 border: '1px solid rgba(99,102,241,0.2)', borderRadius: 16, padding: 24
@@ -552,6 +638,7 @@ export default function ForecastPage() {
                   sequential patterns; XGBoost anchors stable feature relationships and prevents
                   autoregressive drift.
                 </p>
+
                 {/* Model legend */}
                 <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
                   {[
@@ -569,8 +656,8 @@ export default function ForecastPage() {
                 {/* Per-model metric comparison */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
                   {[
-                    { label: 'LSTM', rmse: lstmRmse, mae: lstmMae, color: '#a78bfa' },
-                    { label: 'XGBoost', rmse: xgbRmse, mae: xgbMae, color: '#34d399' },
+                    { label: 'LSTM',    rmse: lstmRmse, mae: lstmMae, color: '#a78bfa' },
+                    { label: 'XGBoost', rmse: xgbRmse,  mae: xgbMae,  color: '#34d399' },
                   ].map(m => (
                     <div key={m.label} style={{
                       background: 'rgba(99,102,241,0.07)', borderRadius: 10,
@@ -578,17 +665,33 @@ export default function ForecastPage() {
                     }}>
                       <p style={{ fontWeight: 700, fontSize: 12, color: m.color, marginBottom: 8 }}>{m.label}</p>
                       <p style={{ fontSize: 12, color: '#94a3b8' }}>RMSE: <strong style={{ color: '#f1f5f9' }}>{m.rmse.toFixed(1)}</strong></p>
-                      <p style={{ fontSize: 12, color: '#94a3b8' }}>MAE: <strong style={{ color: '#f1f5f9' }}>${m.mae.toFixed(0)}</strong></p>
+                      <p style={{ fontSize: 12, color: '#94a3b8' }}>MAE:  <strong style={{ color: '#f1f5f9' }}>${m.mae.toFixed(0)}</strong></p>
                     </div>
                   ))}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   {[
-                    { label: 'Strengths', items: ['XGBoost prevents forecast collapse', 'LSTM captures weekly seasonality', 'Good for 14–21 day horizons'] },
-                    { label: 'Limitations', items: ['Needs 60+ days of history', 'May miss sudden promotions', 'Blend weight is fixed at 50/50'] },
+                    {
+                      label: 'Strengths',
+                      items: [
+                        'XGBoost prevents forecast collapse',
+                        'LSTM captures weekly seasonality',
+                        'Good for 14–21 day horizons',
+                      ]
+                    },
+                    {
+                      label: 'Limitations',
+                      items: [
+                        'Needs 60+ days of history',
+                        'May miss sudden promotions',
+                        'Blend weight is fixed at 50/50',
+                      ]
+                    },
                   ].map(section => (
-                    <div key={section.label} style={{ background: 'rgba(99,102,241,0.07)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div key={section.label} style={{
+                      background: 'rgba(99,102,241,0.07)', borderRadius: 10, padding: '14px 16px'
+                    }}>
                       <p style={{ fontWeight: 700, fontSize: 12, color: '#a5b4fc', marginBottom: 10, letterSpacing: '0.05em' }}>
                         {section.label.toUpperCase()}
                       </p>
@@ -617,3 +720,6 @@ export default function ForecastPage() {
     </div>
   )
 }
+
+// Expose WINDOW to the JSX insights text without importing from Python
+const WINDOW = 30
