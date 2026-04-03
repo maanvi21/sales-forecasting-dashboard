@@ -95,8 +95,9 @@ frontend/
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/maanvi21/v0-saa-s-dashboard-ui.git
-   cd v0-saa-s-dashboard-ui
+   git clone https://github.com/maanvi21/sales-forecasting-dashboard.git
+   cd sales-forecasting-dashboard
+
    ```
 
 2. **Start services with Docker Compose:**
