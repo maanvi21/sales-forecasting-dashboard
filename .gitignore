@@ -14,7 +14,7 @@ next.user-config.*
 node_modules
 .next/
 .DS_Store
-
+venv/
 # Backend (Python)
 backend/venv312/
 backend/__pycache__/

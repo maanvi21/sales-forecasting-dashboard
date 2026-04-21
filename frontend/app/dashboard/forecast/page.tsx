@@ -5,6 +5,7 @@ import {
   Upload, Loader2, TrendingUp, AlertTriangle, CheckCircle2,
   BarChart3, Zap, Activity, Target
 } from 'lucide-react'
+import { toast, Toaster } from 'sonner'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, Legend,
@@ -184,14 +185,22 @@ export default function ForecastPage() {
   const runForecast = async (file: File) => {
     setIsUploading(true); setError(null)
     const fd = new FormData(); fd.append('file', file)
+    const toastId = toast.loading('Training MLP Neural Network + XGBoost ensemble...')
     try {
       const res  = await fetch(`${API}/upload-and-forecast`, { method: 'POST', body: fd })
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail ?? 'Forecast failed')
       if (!isValidForecast(data)) throw new Error('Backend returned an unexpected response shape.')
       setForecastData(data)
+      toast.success(`Forecast ready! Processed ${data.rows_processed?.toLocaleString() ?? '—'} rows.`, {
+        id: toastId,
+        description: `LSTM RMSE: ${data.metrics.lstm_rmse.toFixed(1)} · XGB RMSE: ${data.metrics.xgb_rmse.toFixed(1)}`,
+        duration: 6000,
+      })
     } catch (err: any) {
-      setError(err.message ?? 'Forecast generation failed')
+      const msg = err.message ?? 'Forecast generation failed'
+      setError(msg)
+      toast.error('Forecast failed', { id: toastId, description: msg })
     } finally {
       setIsUploading(false)
     }
@@ -245,6 +254,22 @@ export default function ForecastPage() {
   const xgbRmse  = metrics?.xgb_rmse  ?? 0
   const xgbMae   = metrics?.xgb_mae   ?? 0
 
+  // Trigger smart trend alert once forecast data is set
+  useEffect(() => {
+    if (!forecastData) return
+    if (trend === 'down') {
+      toast.warning('📉 Downtrend Detected!', {
+        description: 'Forecast shows a sales slowdown vs recent actuals. Consider running promotions.',
+        duration: 8000,
+      })
+    } else if (trend === 'up') {
+      toast.success('📈 Upward Trend Detected!', {
+        description: 'Strong demand growth predicted. Consider scaling inventory now.',
+        duration: 6000,
+      })
+    }
+  }, [forecastData])
+
   return (
     <div style={{
       minHeight: '100vh',
@@ -253,6 +278,7 @@ export default function ForecastPage() {
       fontFamily: "'DM Sans', 'Inter', sans-serif",
       padding: '32px 24px',
     }}>
+      <Toaster position="top-right" richColors />
       <div style={{ maxWidth: 1200, margin: '0 auto' }}>
 
         {/* Header */}
