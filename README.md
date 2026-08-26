@@ -68,10 +68,10 @@ Results on **Global_Superstore2.csv** (the reference dataset used during develop
                                      └───────────────────────────────────┘
 ```
 
-**Backend:** Python 3.10+, FastAPI, TensorFlow/Keras, XGBoost, scikit-learn, pandas, joblib  
+**Backend:** Python 3.10+, FastAPI, PyTorch, XGBoost, scikit-learn, pandas, joblib  
 **Frontend:** Next.js 14, React, Recharts, lucide-react, TypeScript  
 **Models:** 
-- LSTM: 2-layer (128 → 64 units), Huber loss, Adam, EarlyStopping + ReduceLROnPlateau
+- LSTM: 2-layer (128 → 64 units), Huber loss, Adam, ReduceLROnPlateau + early stopping (implemented in PyTorch)
 - XGBoost: Gradient boosting regressor with hyperparameter tuning
 
 ---
@@ -95,7 +95,7 @@ Minimum recommended history: **90+ days** of daily data. The model uses a 30-day
 
 ```bash
 # Backend
-pip install fastapi uvicorn tensorflow scikit-learn pandas joblib xgboost python-multipart
+pip install fastapi uvicorn torch scikit-learn pandas joblib xgboost python-multipart
 uvicorn main:app --port 8000 --reload
 
 # Frontend
@@ -119,7 +119,7 @@ The frontend expects the API at `http://localhost:8000`. Update the `API` consta
 
 Both `POST` forecast endpoints accept optional query params:
 - `horizon_days` (int, 7–90, default 30) — forecast window length
-- `epochs` (int, 10–500, default 100) — *(currently not passed to training — known bug)*
+- `epochs` (int, 10–500, default 100) — max LSTM training epochs (early stopping usually halts sooner)
 
 ---
 
@@ -158,19 +158,17 @@ The API returns (and the frontend validates against) this exact structure:
 
 ## Known Limitations
 
-1. **Autoregressive Rollout**: Lag features not updated during multi-step prediction (causes upward curve bias)
-2. **Single CSV Upload**: No batch processing or incremental learning
-3. **In-Memory Training**: Large datasets (>100k rows) may hit memory/compute limits
-4. **No Cross-Validation**: Uses single train/test split for evaluation
-5. **Prototype Status**: Not optimized for production deployment
+1. **Single CSV Upload**: No batch processing or incremental learning
+2. **In-Memory Training**: Large datasets (>100k rows) may hit memory/compute limits
+3. **No Cross-Validation**: Uses a single chronological train/test split for evaluation, not walk-forward backtesting
+4. **Prototype Status**: Not optimized for production deployment
 
 ---
 
 ## Future Improvements
 
 - [ ] Add Prophet model to the ensemble
-- [ ] Implement proper backtesting framework
+- [ ] Implement proper walk-forward backtesting framework
 - [ ] Add feature importance visualizations
-- [ ] Optimize lag feature updates during autoregressive forecasting
 - [ ] Add user authentication and data persistence
 - [ ] Deploy to cloud (AWS/GCP/Azure)

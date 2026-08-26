@@ -1,4 +1,5 @@
 
+import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
@@ -64,11 +65,12 @@ def _run_pipeline(
     df: pd.DataFrame,
     filename: str,
     horizon_days: int = 30,
+    epochs: int = 100,
 ) -> dict:
 
     fc.prepare_data(df)
     fc.build_model()
-    fc.train()
+    fc.train(epochs=epochs)
 
     # forecast() internally calls evaluate() and returns the full payload
     result = fc.forecast(df, horizon_days=horizon_days)
@@ -118,7 +120,7 @@ async def upload_and_forecast(
         print(f"✅ {file.filename} rows={len(df)}")
 
         fc = LSTMForecaster(target_col="Sales")
-        result = _run_pipeline(fc, df, filename=file.filename, horizon_days=horizon_days)
+        result = _run_pipeline(fc, df, filename=file.filename, horizon_days=horizon_days, epochs=epochs)
 
         latest_forecast = result
         joblib.dump(result, MODELS_DIR / "latest_forecast.joblib")
@@ -151,7 +153,7 @@ async def retrain(
         print(f"🔄 Retraining {file.filename}")
 
         fc = LSTMForecaster(target_col="Sales")
-        result = _run_pipeline(fc, df, filename=file.filename, horizon_days=horizon_days)
+        result = _run_pipeline(fc, df, filename=file.filename, horizon_days=horizon_days, epochs=epochs)
 
         latest_forecast = result
         joblib.dump(result, MODELS_DIR / "latest_forecast.joblib")
