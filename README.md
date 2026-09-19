@@ -155,14 +155,6 @@ The API returns (and the frontend validates against) this exact structure:
 - **Browser-Based Training**: No server-side model persistence required (though cached via joblib)
 - **Configurable Horizon**: Forecast 7–90 days ahead
 
----
-
-## Known Limitations
-
-1. **Single CSV Upload**: No batch processing or incremental learning
-2. **In-Memory Training**: Large datasets (>100k rows) may hit memory/compute limits
-3. **No Cross-Validation**: Uses a single chronological train/test split for evaluation, not walk-forward backtesting
-4. **Prototype Status**: Not optimized for production deployment
 
 ---
 
