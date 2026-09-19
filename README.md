@@ -107,6 +107,7 @@ npm run dev
 The frontend expects the API at `http://localhost:8000`. Update the `API` constant in `page.tsx` to change this.
 
 ---
+---
 
 ## API Endpoints
 
