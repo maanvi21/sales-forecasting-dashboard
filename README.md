@@ -3,6 +3,7 @@
 A full-stack web application for demand forecasting using an **LSTM + XGBoost ensemble**. Upload historical sales data, train models in-browser, and visualize a 30-day blended forecast — all without leaving your browser.
 
 ---
+<img width="1191" height="582" alt="image" src="https://github.com/user-attachments/assets/5a9e4509-3453-4590-a56c-2a44f6eddb7a" />
 
 ## Overview
 
